@@ -154,6 +154,48 @@ public class ApiAdapterTests
         Assert.Contains("Falha ao deserializar", resposta.MensagemErro);
     }
 
+    // ─── Testes de deserializador customizado (envelope) ───
+
+    [Fact]
+    public async Task DeveUsarDesserializadorCustomizadoParaExtrairDadosDoEnvelope()
+    {
+        var envelopeJson = """{"sucesso": true, "dados": {"id": 1, "nomeCompleto": "Carlos", "faixa": "roxa"}, "mensagem": "OK"}""";
+
+        var handler = new FakeHttpHandler(HttpStatusCode.OK, envelopeJson);
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.teste.com") };
+
+        var config = CriarConfiguracaoPadrao();
+        config.Desserializador = new FakeEnvelopeDesserializador();
+
+        var adapter = new ApiAdapter(client, config, CriarLogger());
+
+        var resposta = await adapter.EnviarAsync<AlunoExternoDto>("listar");
+
+        Assert.True(resposta.Sucesso);
+        Assert.NotNull(resposta.Dados);
+        Assert.Equal("Carlos", resposta.Dados.NomeCompleto);
+        Assert.Equal("roxa", resposta.Dados.Faixa);
+    }
+
+    [Fact]
+    public async Task DeveUsarDesserializadorPadraoQuandoNenhumCustomizadoConfigurado()
+    {
+        var dto = new AlunoExternoDto { Id = 5, NomeCompleto = "Ana", Faixa = "preta" };
+        var json = JsonSerializer.Serialize(dto, JsonOptions);
+
+        var handler = new FakeHttpHandler(HttpStatusCode.OK, json);
+        var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.teste.com") };
+
+        // Sem Desserializador = usa DesserializadorPadrao
+        var adapter = new ApiAdapter(client, CriarConfiguracaoPadrao(), CriarLogger());
+
+        var resposta = await adapter.EnviarAsync<AlunoExternoDto>("listar");
+
+        Assert.True(resposta.Sucesso);
+        Assert.NotNull(resposta.Dados);
+        Assert.Equal("Ana", resposta.Dados.NomeCompleto);
+    }
+
     // ─── Testes de tratamento de erro ───
 
     [Fact]
@@ -220,6 +262,24 @@ public class ApiAdapterTests
             {
                 Content = new StringContent(_content!)
             });
+        }
+    }
+
+    // ─── Fake Envelope Deserializer ───
+
+    private class EnvelopePadrao<T>
+    {
+        public bool Sucesso { get; set; }
+        public T? Dados { get; set; }
+        public string? Mensagem { get; set; }
+    }
+
+    private class FakeEnvelopeDesserializador : IDesserializadorResposta
+    {
+        public T? Desserializar<T>(string conteudo, JsonSerializerOptions options)
+        {
+            var envelope = JsonSerializer.Deserialize<EnvelopePadrao<T>>(conteudo, options);
+            return envelope is { Sucesso: true } ? envelope.Dados : default;
         }
     }
 }

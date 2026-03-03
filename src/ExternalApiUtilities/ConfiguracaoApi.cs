@@ -30,4 +30,14 @@ public class ConfiguracaoApi
     /// Rotas (endpoints) disponíveis nesta API.
     /// </summary>
     public List<RotaApi> Rotas { get; set; } = [];
+
+    /// <summary>
+    /// Deserializador customizado para respostas desta API.
+    /// <para>
+    /// Use quando a API retorna um envelope padrão (ex: <c>{ "success": true, "data": ... }</c>)
+    /// e você quer extrair os dados automaticamente antes de passar para o mapper.
+    /// </para>
+    /// Se <c>null</c>, usa o deserializador padrão (<see cref="System.Text.Json.JsonSerializer"/>).
+    /// </summary>
+    public IDesserializadorResposta? Desserializador { get; set; }
 }

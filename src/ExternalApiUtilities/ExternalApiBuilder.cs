@@ -28,6 +28,7 @@ public class ExternalApiBuilder
     ///     api.Nome = "academia-api";
     ///     api.UrlBase = "https://api.academia.com";
     ///     api.HeadersPadrao["Authorization"] = "Bearer token";
+    ///     api.Desserializador = new DesserializadorComEnvelope(); // para APIs com envelope padrão
     ///     api.Rotas.Add(new RotaApi { Nome = "listar-alunos", Caminho = "/api/alunos" });
     ///     api.Rotas.Add(new RotaApi { Nome = "buscar-aluno", Caminho = "/api/alunos/{id}" });
     /// });

@@ -19,6 +19,7 @@ public class ApiAdapter : IApiAdapter
     private readonly ConfiguracaoApi _configuracao;
     private readonly ILogger<ApiAdapter> _logger;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly IDesserializadorResposta _desserializador;
 
     public ApiAdapter(
         HttpClient httpClient,
@@ -34,6 +35,8 @@ public class ApiAdapter : IApiAdapter
             PropertyNameCaseInsensitive = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
+
+        _desserializador = configuracao.Desserializador ?? new DesserializadorPadrao();
     }
 
     /// <inheritdoc />
@@ -114,7 +117,7 @@ public class ApiAdapter : IApiAdapter
 
         try
         {
-            resposta.Dados = JsonSerializer.Deserialize<T>(respostaBruta.ConteudoBruto, _jsonOptions);
+            resposta.Dados = _desserializador.Desserializar<T>(respostaBruta.ConteudoBruto, _jsonOptions);
         }
         catch (JsonException ex)
         {
