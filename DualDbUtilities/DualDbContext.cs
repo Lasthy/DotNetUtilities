@@ -51,22 +51,29 @@ public class DualDbContext
     #region Escrita (Banco Temporário)
 
     /// <summary>
-    /// Adiciona uma entidade ao banco temporário e persiste imediatamente.
+    /// Adiciona ou atualiza uma entidade no banco temporário (upsert por PK).
+    /// <para>
+    /// Se a entidade já existir no temporário, ela será atualizada.
+    /// Se a entidade implementar <see cref="IEntidadePlaceholder"/> e for placeholder,
+    /// ela <b>não</b> sobrescreverá uma entidade completa já existente.
+    /// </para>
     /// </summary>
     public async Task AdicionarAsync<T>(T entidade, CancellationToken ct = default) where T : class, IEntidade
     {
         await using var _ = await _coordinator.AdquirirOperacaoAsync(ct);
-        _temporario.Set<T>().Add(entidade);
+        await UpsertTemporarioAsync(entidade, ct);
         await _temporario.SaveChangesAsync(ct);
     }
 
     /// <summary>
-    /// Adiciona várias entidades ao banco temporário em batch e persiste imediatamente.
+    /// Adiciona ou atualiza várias entidades no banco temporário em batch (upsert por PK).
+    /// Aplica as mesmas regras de placeholder de <see cref="AdicionarAsync{T}"/>.
     /// </summary>
     public async Task AdicionarVariosAsync<T>(IEnumerable<T> entidades, CancellationToken ct = default) where T : class, IEntidade
     {
         await using var _ = await _coordinator.AdquirirOperacaoAsync(ct);
-        _temporario.Set<T>().AddRange(entidades);
+        foreach (var entidade in entidades)
+            await UpsertTemporarioAsync(entidade, ct);
         await _temporario.SaveChangesAsync(ct);
     }
 
@@ -114,6 +121,64 @@ public class DualDbContext
     {
         await using var _ = await _coordinator.AdquirirOperacaoAsync(ct);
         await _temporario.SaveChangesAsync(ct);
+    }
+
+    #endregion
+
+    #region Upsert helpers
+
+    /// <summary>
+    /// Faz upsert de uma entidade no banco temporário respeitando regras de placeholder.
+    /// </summary>
+    private async Task UpsertTemporarioAsync<T>(T entidade, CancellationToken ct) where T : class, IEntidade
+    {
+        var entityType = _temporario.Model.FindEntityType(typeof(T));
+        var pkProperties = entityType?.FindPrimaryKey()?.Properties;
+
+        if (pkProperties is not { Count: > 0 })
+        {
+            _temporario.Set<T>().Add(entidade);
+            return;
+        }
+
+        var pkValues = pkProperties
+            .Select(p => p.PropertyInfo!.GetValue(entidade))
+            .ToArray()!;
+
+        var existente = await _temporario.Set<T>().FindAsync(pkValues, ct);
+
+        if (existente != null)
+        {
+            if (DeveIgnorarPorPlaceholder(entidade, existente))
+            {
+                _logger.LogDebug(
+                    "Entidade {Tipo} com PK [{PK}] é placeholder e não sobrescreverá registro completo no temporário.",
+                    typeof(T).Name,
+                    string.Join(", ", pkValues));
+                return;
+            }
+
+            _temporario.Entry(existente).CurrentValues.SetValues(entidade);
+        }
+        else
+        {
+            _temporario.Set<T>().Add(entidade);
+        }
+    }
+
+    /// <summary>
+    /// Retorna <c>true</c> se a entidade nova é placeholder e a existente não é
+    /// (ou seja, a escrita deve ser ignorada para preservar dados completos).
+    /// Para tipos que não implementam <see cref="IEntidadePlaceholder"/>, sempre retorna <c>false</c>.
+    /// </summary>
+    private static bool DeveIgnorarPorPlaceholder<T>(T nova, T existente)
+    {
+        if (nova is IEntidadePlaceholder novaP && novaP.EhPlaceholder)
+        {
+            if (existente is IEntidadePlaceholder existenteP && !existenteP.EhPlaceholder)
+                return true;
+        }
+        return false;
     }
 
     #endregion
@@ -241,6 +306,15 @@ public class DualDbContext
 
                     if (existing != null)
                     {
+                        if (DeveIgnorarPorPlaceholder(entity, existing))
+                        {
+                            _logger.LogDebug(
+                                "Entidade {Tipo} com PK [{PK}] é placeholder e não sobrescreverá registro completo no final.",
+                                typeof(T).Name,
+                                string.Join(", ", pkValues));
+                            continue;
+                        }
+
                         _final.Entry(existing).CurrentValues.SetValues(entity);
                     }
                     else

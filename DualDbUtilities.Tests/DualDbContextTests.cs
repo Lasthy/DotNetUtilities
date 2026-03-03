@@ -251,4 +251,194 @@ public class DualDbContextTests : IAsyncLifetime
         await using var finalDb = CreateFinalContext();
         Assert.Equal(0, await finalDb.Set<CategoriaTeste>().CountAsync());
     }
+
+    // ────────────────────────────────────────────────────────────
+    // Upsert no Temporário
+    // ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DeveAtualizarNoTemporarioQuandoPKJaExiste()
+    {
+        var dual = CreateDualContext();
+        await dual.AdicionarAsync(new CategoriaTeste { Id = 1, Nome = "Original" });
+        await dual.AdicionarAsync(new CategoriaTeste { Id = 1, Nome = "Atualizado" });
+
+        await using var tempDb = CreateTempContext();
+        var all = await tempDb.Set<CategoriaTeste>().ToListAsync();
+        Assert.Single(all);
+        Assert.Equal("Atualizado", all[0].Nome);
+    }
+
+    [Fact]
+    public async Task DeveAtualizarVariosNoTemporarioQuandoPKJaExiste()
+    {
+        var dual = CreateDualContext();
+        await dual.AdicionarVariosAsync(new[]
+        {
+            new CategoriaTeste { Id = 1, Nome = "Cat A" },
+            new CategoriaTeste { Id = 2, Nome = "Cat B" }
+        });
+
+        // Atualiza uma e insere outra
+        await dual.AdicionarVariosAsync(new[]
+        {
+            new CategoriaTeste { Id = 1, Nome = "Cat A v2" },
+            new CategoriaTeste { Id = 3, Nome = "Cat C" }
+        });
+
+        await using var tempDb = CreateTempContext();
+        var all = await tempDb.Set<CategoriaTeste>().OrderBy(c => c.Id).ToListAsync();
+        Assert.Equal(3, all.Count);
+        Assert.Equal("Cat A v2", all[0].Nome);
+        Assert.Equal("Cat B", all[1].Nome);
+        Assert.Equal("Cat C", all[2].Nome);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // Placeholder
+    // ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PlaceholderNaoDeveSobrescreverEntidadeCompletaNoTemporario()
+    {
+        var dual = CreateDualContext();
+
+        // Insere entidade completa
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "João", Email = "joao@email.com", EhPlaceholder = false
+        });
+
+        // Tenta sobrescrever com placeholder — deve ser ignorado
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "Placeholder", EhPlaceholder = true
+        });
+
+        await using var tempDb = CreateTempContext();
+        var aluno = await tempDb.Set<AlunoTeste>().FindAsync(1);
+        Assert.NotNull(aluno);
+        Assert.Equal("João", aluno.Nome);
+        Assert.Equal("joao@email.com", aluno.Email);
+        Assert.False(aluno.EhPlaceholder);
+    }
+
+    [Fact]
+    public async Task EntidadeCompletaDeveSobrescreverPlaceholderNoTemporario()
+    {
+        var dual = CreateDualContext();
+
+        // Insere placeholder
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "Placeholder", EhPlaceholder = true
+        });
+
+        // Sobrescreve com entidade completa
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "João", Email = "joao@email.com", EhPlaceholder = false
+        });
+
+        await using var tempDb = CreateTempContext();
+        var aluno = await tempDb.Set<AlunoTeste>().FindAsync(1);
+        Assert.NotNull(aluno);
+        Assert.Equal("João", aluno.Nome);
+        Assert.False(aluno.EhPlaceholder);
+    }
+
+    [Fact]
+    public async Task PlaceholderDeveSobrescreverOutroPlaceholderNoTemporario()
+    {
+        var dual = CreateDualContext();
+
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "Placeholder v1", EhPlaceholder = true
+        });
+
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "Placeholder v2", EhPlaceholder = true
+        });
+
+        await using var tempDb = CreateTempContext();
+        var aluno = await tempDb.Set<AlunoTeste>().FindAsync(1);
+        Assert.NotNull(aluno);
+        Assert.Equal("Placeholder v2", aluno.Nome);
+    }
+
+    [Fact]
+    public async Task PlaceholderNaoDeveSobrescreverEntidadeCompletaNoFinalNaSync()
+    {
+        // Insere entidade completa diretamente no final
+        await using (var finalDb = CreateFinalContext())
+        {
+            finalDb.Set<AlunoTeste>().Add(new AlunoTeste
+            {
+                Id = 1, Nome = "João Completo", Email = "joao@email.com", EhPlaceholder = false
+            });
+            await finalDb.SaveChangesAsync();
+        }
+
+        // Adiciona placeholder no temporário
+        var dual = CreateDualContext();
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "Placeholder", EhPlaceholder = true
+        });
+
+        await dual.SincronizarAsync();
+
+        // O registro completo no final não deve ter sido sobrescrito
+        await using var finalDb2 = CreateFinalContext();
+        var aluno = await finalDb2.Set<AlunoTeste>().FindAsync(1);
+        Assert.NotNull(aluno);
+        Assert.Equal("João Completo", aluno.Nome);
+        Assert.False(aluno.EhPlaceholder);
+    }
+
+    [Fact]
+    public async Task EntidadeCompletaDeveSobrescreverPlaceholderNoFinalNaSync()
+    {
+        // Insere placeholder diretamente no final
+        await using (var finalDb = CreateFinalContext())
+        {
+            finalDb.Set<AlunoTeste>().Add(new AlunoTeste
+            {
+                Id = 1, Nome = "Placeholder", EhPlaceholder = true
+            });
+            await finalDb.SaveChangesAsync();
+        }
+
+        // Adiciona entidade completa no temporário
+        var dual = CreateDualContext();
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 1, Nome = "João Completo", Email = "joao@email.com", EhPlaceholder = false
+        });
+
+        await dual.SincronizarAsync();
+
+        await using var finalDb2 = CreateFinalContext();
+        var aluno = await finalDb2.Set<AlunoTeste>().FindAsync(1);
+        Assert.NotNull(aluno);
+        Assert.Equal("João Completo", aluno.Nome);
+        Assert.False(aluno.EhPlaceholder);
+    }
+
+    [Fact]
+    public async Task EntidadeSemPlaceholderInterfaceDeveFazerUpsertNormalmente()
+    {
+        var dual = CreateDualContext();
+
+        // CategoriaTeste não implementa IEntidadePlaceholder — upsert puro
+        await dual.AdicionarAsync(new CategoriaTeste { Id = 1, Nome = "Original" });
+        await dual.AdicionarAsync(new CategoriaTeste { Id = 1, Nome = "Atualizado" });
+
+        await using var tempDb = CreateTempContext();
+        var cat = await tempDb.Set<CategoriaTeste>().FindAsync(1);
+        Assert.NotNull(cat);
+        Assert.Equal("Atualizado", cat.Nome);
+    }
 }
