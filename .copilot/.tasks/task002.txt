@@ -1,0 +1,6 @@
+Create a classlib that will have resources related to external API calls.
+- It will have adapters so that we can request from multiple APIs
+- Mappers, so that we can convert the API response to an entity
+- Possibility to request from multiple routes of a API
+- Possibility to add hosted services, that will request from an endpoint from time to time
+- Support to DualDb to save the request response
