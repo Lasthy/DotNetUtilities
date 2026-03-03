@@ -1,4 +1,4 @@
 <Solution>
-  <Project Path="DualDbUtilities\DualDbUtilities.csproj" />
-  <Project Path="DualDbUtilities.Tests\DualDbUtilities.Tests.csproj" />
+  <Project Path="src\DualDbUtilities\DualDbUtilities.csproj" />
+  <Project Path="tests\DualDbUtilities.Tests\DualDbUtilities.Tests.csproj" />
 </Solution>
