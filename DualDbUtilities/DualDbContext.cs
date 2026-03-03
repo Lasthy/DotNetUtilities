@@ -128,14 +128,24 @@ public class DualDbContext
     #region Upsert helpers
 
     /// <summary>
-    /// Faz upsert de uma entidade no banco temporário respeitando regras de placeholder.
+    /// Faz upsert de uma entidade no banco temporário respeitando regras de placeholder
+    /// e remapeamento de PK via <see cref="IIdentificavelPorNome"/>.
+    /// <para>Fluxo:</para>
+    /// <list type="number">
+    ///   <item><description>Busca por PK no temporário.</description></item>
+    ///   <item><description>Se não encontrado por PK e implementa <see cref="IIdentificavelPorNome"/> + <see cref="IEntidadePlaceholder"/>:
+    ///     busca placeholder existente por <c>Nome</c>.</description></item>
+    ///   <item><description>Se encontrado por Nome com PK diferente e o existente é placeholder:
+    ///     remapeia a PK antiga para a nova em cascata (incluindo FKs dependentes).</description></item>
+    ///   <item><description>Aplica regras de placeholder normais para decidir se atualiza ou ignora.</description></item>
+    /// </list>
     /// </summary>
     private async Task UpsertTemporarioAsync<T>(T entidade, CancellationToken ct) where T : class, IEntidade
     {
         var entityType = _temporario.Model.FindEntityType(typeof(T));
         var pkProperties = entityType?.FindPrimaryKey()?.Properties;
 
-        if (pkProperties is not { Count: > 0 })
+        if (pkProperties is not { Count: > 0 } || entityType is null)
         {
             _temporario.Set<T>().Add(entidade);
             return;
@@ -149,6 +159,7 @@ public class DualDbContext
 
         if (existente != null)
         {
+            // Encontrou por PK — upsert normal com regra de placeholder
             if (DeveIgnorarPorPlaceholder(entidade, existente))
             {
                 _logger.LogDebug(
@@ -159,12 +170,188 @@ public class DualDbContext
             }
 
             _temporario.Entry(existente).CurrentValues.SetValues(entidade);
+            return;
         }
-        else
+
+        // Não encontrou por PK — verificar se existe placeholder com mesmo Nome
+        if (entidade is IIdentificavelPorNome nomeada
+            && typeof(IEntidadePlaceholder).IsAssignableFrom(typeof(T)))
         {
-            _temporario.Set<T>().Add(entidade);
+            var nome = nomeada.Nome;
+            var placeholderExistente = await BuscarPlaceholderPorNomeAsync<T>(nome, ct);
+
+            if (placeholderExistente != null)
+            {
+                var existentePkValues = pkProperties
+                    .Select(p => p.PropertyInfo!.GetValue(placeholderExistente))
+                    .ToArray()!;
+
+                var pksIguais = pkValues.Length == existentePkValues.Length
+                    && pkValues.Zip(existentePkValues).All(pair =>
+                        Equals(pair.First, pair.Second));
+
+                if (!pksIguais)
+                {
+                    if (DeveIgnorarPorPlaceholder(entidade, placeholderExistente))
+                    {
+                        _logger.LogDebug(
+                            "Entidade {Tipo} \"{Nome}\" é placeholder e não sobrescreverá registro completo no temporário.",
+                            typeof(T).Name, nome);
+                        return;
+                    }
+
+                    _logger.LogInformation(
+                        "Remapeando PK de {Tipo} \"{Nome}\": [{PKAntiga}] → [{PKNova}].",
+                        typeof(T).Name, nome,
+                        string.Join(", ", existentePkValues),
+                        string.Join(", ", pkValues));
+
+                    // Salva mudanças pendentes antes do remap (que usa SQL raw)
+                    await _temporario.SaveChangesAsync(ct);
+                    _temporario.ChangeTracker.Clear();
+
+                    await RemapearChavePrimariaAsync(entityType, existentePkValues!, pkValues!, entidade, ct);
+                    return;
+                }
+
+                // PK igual — upsert normal
+                if (DeveIgnorarPorPlaceholder(entidade, placeholderExistente))
+                    return;
+
+                _temporario.Entry(placeholderExistente).CurrentValues.SetValues(entidade);
+                return;
+            }
+        }
+
+        // Não existe nada — inserir
+        _temporario.Set<T>().Add(entidade);
+    }
+
+    /// <summary>
+    /// Busca um placeholder por Nome no banco temporário.
+    /// Retorna <c>null</c> se a entidade não implementar <see cref="IEntidadePlaceholder"/>.
+    /// </summary>
+    private async Task<T?> BuscarPlaceholderPorNomeAsync<T>(string nome, CancellationToken ct) where T : class
+    {
+        if (!typeof(IIdentificavelPorNome).IsAssignableFrom(typeof(T)))
+            return null;
+
+        // Busca pelo Nome usando LINQ dinâmico via expressão lambda compilada
+        var resultados = await _temporario.Set<T>().ToListAsync(ct);
+        return resultados.FirstOrDefault(e =>
+            e is IIdentificavelPorNome n && n.Nome == nome
+            && e is IEntidadePlaceholder p && p.EhPlaceholder);
+    }
+
+    /// <summary>
+    /// Remapeia a chave primária de uma entidade no banco temporário e atualiza todas
+    /// as FKs dependentes em cascata. Utiliza SQL raw pois EF Core não permite alterar PKs.
+    /// </summary>
+    private async Task RemapearChavePrimariaAsync<T>(
+        IEntityType entityType,
+        object[] pkAntiga,
+        object[] pkNova,
+        T entidadeNova,
+        CancellationToken ct) where T : class
+    {
+        var pkProperties = entityType.FindPrimaryKey()!.Properties;
+        var tableName = entityType.GetTableName()!;
+
+        // Desabilita FK constraints no SQLite para permitir atualização de PK
+        await _temporario.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = OFF;", ct);
+
+        try
+        {
+            // 1. Atualiza todas as FKs dependentes que referenciam esta entidade
+            var allEntityTypes = _temporario.Model.GetEntityTypes()
+                .Where(e => typeof(IEntidade).IsAssignableFrom(e.ClrType));
+
+            foreach (var dependentType in allEntityTypes)
+            {
+                foreach (var fk in dependentType.GetForeignKeys())
+                {
+                    if (fk.PrincipalEntityType != entityType) continue;
+
+                    var depTableName = dependentType.GetTableName()!;
+                    var fkProps = fk.Properties;
+                    var principalProps = fk.PrincipalKey.Properties;
+
+                    // Constrói WHERE para os valores antigos e SET para os novos
+                    var setClauses = new List<string>();
+                    var whereClauses = new List<string>();
+
+                    for (int i = 0; i < principalProps.Count; i++)
+                    {
+                        var fkColName = fkProps[i].GetColumnName()!;
+                        var pkIndex = pkProperties.ToList().IndexOf(principalProps[i]);
+                        if (pkIndex < 0) continue;
+
+                        setClauses.Add($"\"{fkColName}\" = {FormatSqlValue(pkNova[pkIndex])}");
+                        whereClauses.Add($"\"{fkColName}\" = {FormatSqlValue(pkAntiga[pkIndex])}");
+                    }
+
+                    if (setClauses.Count == 0) continue;
+
+                    var sql = $"UPDATE \"{depTableName}\" SET {string.Join(", ", setClauses)} WHERE {string.Join(" AND ", whereClauses)}";
+#pragma warning disable EF1002 // values come from entity PKs, not user input
+                    await _temporario.Database.ExecuteSqlRawAsync(sql, ct);
+#pragma warning restore EF1002
+
+                    _logger.LogDebug("FK atualizada em \"{Tabela}\": {SQL}", depTableName, sql);
+                }
+            }
+
+            // 2. Atualiza a PK da própria entidade
+            var pkSetClauses = new List<string>();
+            var pkWhereClauses = new List<string>();
+
+            for (int i = 0; i < pkProperties.Count; i++)
+            {
+                var colName = pkProperties[i].GetColumnName()!;
+                pkSetClauses.Add($"\"{colName}\" = {FormatSqlValue(pkNova[i])}");
+                pkWhereClauses.Add($"\"{colName}\" = {FormatSqlValue(pkAntiga[i])}");
+            }
+
+            var pkSql = $"UPDATE \"{tableName}\" SET {string.Join(", ", pkSetClauses)} WHERE {string.Join(" AND ", pkWhereClauses)}";
+#pragma warning disable EF1002
+            await _temporario.Database.ExecuteSqlRawAsync(pkSql, ct);
+#pragma warning restore EF1002
+
+            // 3. Atualiza os demais campos da entidade (non-PK) via EF
+            _temporario.ChangeTracker.Clear();
+            var reloaded = await _temporario.Set<T>().FindAsync(pkNova, ct);
+            if (reloaded != null)
+            {
+                _temporario.Entry(reloaded).CurrentValues.SetValues(entidadeNova);
+            }
+        }
+        finally
+        {
+            // Reabilita FK constraints e verifica integridade
+            await _temporario.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = ON;", ct);
+
+            try
+            {
+                await _temporario.Database.ExecuteSqlRawAsync("PRAGMA foreign_key_check;", ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Verificação de FK após remap detectou inconsistências.");
+            }
         }
     }
+
+    /// <summary>
+    /// Formata um valor para uso em SQL raw (escapa strings, mantém números).
+    /// </summary>
+    private static string FormatSqlValue(object value) => value switch
+    {
+        string s => $"'{s.Replace("'", "''")}'",
+        Guid g => $"'{g}'",
+        DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss}'",
+        null => "NULL",
+        _ => value.ToString()!
+    };
 
     /// <summary>
     /// Retorna <c>true</c> se a entidade nova é placeholder e a existente não é

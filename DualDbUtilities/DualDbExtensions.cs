@@ -48,7 +48,8 @@ public static class DualDbExtensions
 
         services.AddDbContext<TemporarioDbContext>((_, dbOptions) =>
         {
-            dbOptions.UseSqlite(options.SqliteConnectionString);
+            dbOptions.UseSqlite(options.SqliteConnectionString)
+                .AddInterceptors(new DesabilitarFKInterceptor());
         });
 
         services.AddDbContext<FinalDbContext>((_, dbOptions) =>

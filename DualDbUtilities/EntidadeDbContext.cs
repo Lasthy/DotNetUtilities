@@ -40,6 +40,12 @@ public abstract class EntidadeDbContext : DbContext
                 null);
 
             metodo?.Invoke(null, [builder]);
+
+            // Adiciona índice automático na coluna Nome para entidades IIdentificavelPorNome
+            if (typeof(IIdentificavelPorNome).IsAssignableFrom(tipo))
+            {
+                builder.Entity(tipo).HasIndex(nameof(IIdentificavelPorNome.Nome));
+            }
         }
     }
 }

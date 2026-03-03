@@ -195,6 +195,95 @@ O `DualDbSyncCoordinator` implementa um padrão **async reader-writer lock**:
 
 Isso garante que nenhum dado será perdido durante a transferência.
 
+## Foreign Keys no Banco Temporário
+
+O banco temporário (SQLite) tem as **constraints de FK desabilitadas** propositalmente via `DesabilitarFKInterceptor`. Isso significa que:
+
+- Você pode inserir entidades no temporário que referenciam FKs de registros que **só existem no banco final** — sem erros.
+- Isso é essencial no cenário dual: um `Produto` pode referenciar `CategoriaId = 10`, onde a `Categoria` já foi sincronizada e só existe no final.
+- A integridade referencial é **validada durante a sincronização**, quando os dados chegam ao banco final (SQL Server), que mantém FK constraints ativas.
+
+```csharp
+// Categoria existe apenas no banco final (já foi sincronizada anteriormente)
+// Inserir Produto no temporário com FK para ela funciona normalmente:
+await dual.AdicionarAsync(new Produto { Id = 1, Nome = "Notebook", CategoriaId = 10 });
+
+// Na sincronização, o SQL Server validará que CategoriaId = 10 existe
+await dual.SincronizarAsync();
+```
+
+> **Nota:** Se o banco temporário for acessado manualmente (via `TemporarioSet<T>()`), lembre-se que não há validação de FK — é responsabilidade do chamador garantir que os dados fazem sentido para a sincronização.
+
+## Placeholder e Identificação por Nome
+
+### `IEntidadePlaceholder`
+
+Interface opcional para marcar entidades com dados incompletos:
+
+```csharp
+public class Aluno : IEntidade, IEntidadePlaceholder
+{
+    public int Id { get; set; }
+    public string Nome { get; set; }
+    public bool EhPlaceholder { get; set; }
+    // ...
+}
+```
+
+Regras de precedência:
+
+| Incoming | Existing | Resultado |
+|---|---|---|
+| Completa | Placeholder | ✅ Sobrescreve |
+| Completa | Completa | ✅ Sobrescreve |
+| Placeholder | Placeholder | ✅ Sobrescreve |
+| Placeholder | Completa | ❌ Ignorado |
+
+Estas regras se aplicam tanto na escrita no temporário quanto na sincronização para o final.
+
+### `IIdentificavelPorNome`
+
+Interface para entidades com um nome como identificador natural:
+
+```csharp
+public class Aluno : IEntidade, IEntidadePlaceholder, IIdentificavelPorNome
+{
+    public int Id { get; set; }
+    public string Nome { get; set; }
+    public bool EhPlaceholder { get; set; }
+    // ...
+}
+```
+
+Funcionalidades:
+- **Índice automático** na coluna `Nome` (criado no `OnModelCreating`).
+- **Remapeamento de PK**: quando combinada com `IEntidadePlaceholder`, habilita a troca de chave primária com cascata em FKs.
+
+### Remapeamento de PK
+
+Cenário típico:
+
+```
+1. Placeholder inserido: Id = -1, Nome = "João", EhPlaceholder = true
+2. Matrícula referencia:  AlunoId = -1
+3. Entidade real chega:   Id = 42, Nome = "João", EhPlaceholder = false
+```
+
+O DualDb detecta o placeholder pelo `Nome`, e automaticamente:
+- Atualiza a PK do Aluno de `-1` para `42`
+- Atualiza `AlunoId` de `-1` para `42` em todas as Matrículas
+- Atualiza os demais campos com os dados reais
+
+```csharp
+// Uso transparente — a lógica é automática no AdicionarAsync
+await dual.AdicionarAsync(new Aluno { Id = -1, Nome = "João", EhPlaceholder = true });
+await dual.AdicionarAsync(new Matricula { Id = 1, AlunoId = -1, Turma = "A" });
+
+// Quando a entidade real chega, o remap acontece automaticamente
+await dual.AdicionarAsync(new Aluno { Id = 42, Nome = "João", Email = "joao@email.com", EhPlaceholder = false });
+// Agora: Aluno.Id = 42, Matricula.AlunoId = 42
+```
+
 ## API Reference
 
 ### `DualDbContext`

@@ -53,6 +53,7 @@ public class DualDbContextTests : IAsyncLifetime
     {
         var options = new DbContextOptionsBuilder<TemporarioDbContext>()
             .UseSqlite(_options.SqliteConnectionString)
+            .AddInterceptors(new DesabilitarFKInterceptor())
             .Options;
         return new TemporarioDbContext(options, _options);
     }
@@ -440,5 +441,247 @@ public class DualDbContextTests : IAsyncLifetime
         var cat = await tempDb.Set<CategoriaTeste>().FindAsync(1);
         Assert.NotNull(cat);
         Assert.Equal("Atualizado", cat.Nome);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // Remapeamento de PK (IIdentificavelPorNome)
+    // ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DeveRemapearPKQuandoPlaceholderESubstituidoPorEntidadeReal()
+    {
+        var dual = CreateDualContext();
+
+        // Insere placeholder com PK temporária
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -1, Nome = "João", EhPlaceholder = true
+        });
+
+        // Insere entidade real com PK definitiva e mesmo Nome
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 42, Nome = "João", Email = "joao@email.com", EhPlaceholder = false
+        });
+
+        await using var tempDb = CreateTempContext();
+        var todos = await tempDb.Set<AlunoTeste>().ToListAsync();
+        Assert.Single(todos);
+        Assert.Equal(42, todos[0].Id);
+        Assert.Equal("João", todos[0].Nome);
+        Assert.Equal("joao@email.com", todos[0].Email);
+        Assert.False(todos[0].EhPlaceholder);
+    }
+
+    [Fact]
+    public async Task DeveRemapearFKsDependentesAoRemapearPK()
+    {
+        var dual = CreateDualContext();
+
+        // Insere placeholder do aluno com PK temporária
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -1, Nome = "Maria", EhPlaceholder = true
+        });
+
+        // Insere matrícula que referencia a PK temporária
+        await dual.AdicionarAsync(new MatriculaTeste
+        {
+            Id = 1, AlunoId = -1, Turma = "Turma A"
+        });
+
+        // Agora chega a entidade real do aluno
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 99, Nome = "Maria", Email = "maria@email.com", EhPlaceholder = false
+        });
+
+        await using var tempDb = CreateTempContext();
+
+        // Aluno deve ter PK 99
+        var aluno = await tempDb.Set<AlunoTeste>().FindAsync(99);
+        Assert.NotNull(aluno);
+        Assert.Equal("Maria", aluno.Nome);
+        Assert.False(aluno.EhPlaceholder);
+
+        // Matrícula deve ter FK atualizada para 99
+        var matricula = await tempDb.Set<MatriculaTeste>().FindAsync(1);
+        Assert.NotNull(matricula);
+        Assert.Equal(99, matricula.AlunoId);
+        Assert.Equal("Turma A", matricula.Turma);
+
+        // A PK antiga não deve existir
+        var antigo = await tempDb.Set<AlunoTeste>().FindAsync(-1);
+        Assert.Null(antigo);
+    }
+
+    [Fact]
+    public async Task DeveRemapearVariasFKsDependentes()
+    {
+        var dual = CreateDualContext();
+
+        // Placeholder
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -5, Nome = "Carlos", EhPlaceholder = true
+        });
+
+        // Várias matrículas referenciando a PK temporária
+        await dual.AdicionarVariosAsync(new[]
+        {
+            new MatriculaTeste { Id = 1, AlunoId = -5, Turma = "Turma A" },
+            new MatriculaTeste { Id = 2, AlunoId = -5, Turma = "Turma B" },
+            new MatriculaTeste { Id = 3, AlunoId = -5, Turma = "Turma C" }
+        });
+
+        // Entidade real
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 100, Nome = "Carlos", Email = "carlos@email.com", EhPlaceholder = false
+        });
+
+        await using var tempDb = CreateTempContext();
+        var matriculas = await tempDb.Set<MatriculaTeste>().ToListAsync();
+        Assert.All(matriculas, m => Assert.Equal(100, m.AlunoId));
+        Assert.Equal(3, matriculas.Count);
+    }
+
+    [Fact]
+    public async Task PlaceholderComNomeDiferenteNaoDeveRemapear()
+    {
+        var dual = CreateDualContext();
+
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -1, Nome = "João", EhPlaceholder = true
+        });
+
+        // Nome diferente — não deve remapear, deve inserir como novo
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 42, Nome = "Pedro", Email = "pedro@email.com", EhPlaceholder = false
+        });
+
+        await using var tempDb = CreateTempContext();
+        var todos = await tempDb.Set<AlunoTeste>().OrderBy(a => a.Id).ToListAsync();
+        Assert.Equal(2, todos.Count);
+        Assert.Equal(-1, todos[0].Id);
+        Assert.Equal(42, todos[1].Id);
+    }
+
+    [Fact]
+    public async Task RemapDevePreservarDadosNaoAlterados()
+    {
+        var dual = CreateDualContext();
+
+        // Placeholder com alguns dados
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -1, Nome = "Ana", EhPlaceholder = true
+        });
+
+        // Matrícula existente
+        await dual.AdicionarAsync(new MatriculaTeste
+        {
+            Id = 1, AlunoId = -1, Turma = "Jiu-Jitsu Básico"
+        });
+
+        // Real chega
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 50, Nome = "Ana", Email = "ana@dojo.com", EhPlaceholder = false
+        });
+
+        // Sync tudo pro final
+        await dual.SincronizarAsync();
+
+        await using var finalDb = CreateFinalContext();
+        var aluno = await finalDb.Set<AlunoTeste>()
+            .Include(a => a.Matriculas)
+            .FirstOrDefaultAsync(a => a.Id == 50);
+
+        Assert.NotNull(aluno);
+        Assert.Equal("Ana", aluno.Nome);
+        Assert.Equal("ana@dojo.com", aluno.Email);
+        Assert.Single(aluno.Matriculas);
+        Assert.Equal("Jiu-Jitsu Básico", aluno.Matriculas[0].Turma);
+    }
+
+    [Fact]
+    public async Task PlaceholderNaoDeveRemapearSeExistenteNaoEhPlaceholder()
+    {
+        var dual = CreateDualContext();
+
+        // Entidade completa com PK -1
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = -1, Nome = "João", Email = "joao@email.com", EhPlaceholder = false
+        });
+
+        // Placeholder com mesmo nome e PK diferente — não deve sobrescrever
+        await dual.AdicionarAsync(new AlunoTeste
+        {
+            Id = 42, Nome = "João", EhPlaceholder = true
+        });
+
+        await using var tempDb = CreateTempContext();
+        var todos = await tempDb.Set<AlunoTeste>().ToListAsync();
+        // Placeholder foi ignorado pela regra DeveIgnorarPorPlaceholder
+        // mas it doesn't match by Nome since existing is NOT a placeholder
+        // so it just inserts as new
+        Assert.Equal(2, todos.Count);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // FK referenciando entidade só no banco final
+    // ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DevePermitirAdicionarEntidadeComFKExistenteApenasNoFinal()
+    {
+        // Categoria existe APENAS no banco final
+        await using (var finalDb = CreateFinalContext())
+        {
+            finalDb.Set<CategoriaTeste>().Add(new CategoriaTeste { Id = 10, Nome = "Eletrônicos" });
+            await finalDb.SaveChangesAsync();
+        }
+
+        // Produto no temporário referenciando CategoriaId = 10 que NÃO existe no temporário
+        // Deve funcionar pois FK constraints estão desabilitadas no banco temporário
+        var dual = CreateDualContext();
+        await dual.AdicionarAsync(new ProdutoTeste { Id = 1, Nome = "Notebook", Preco = 3500m, CategoriaId = 10 });
+
+        await using var tempDb = CreateTempContext();
+        var produto = await tempDb.Set<ProdutoTeste>().FindAsync(1);
+        Assert.NotNull(produto);
+        Assert.Equal(10, produto.CategoriaId);
+    }
+
+    [Fact]
+    public async Task DevePermitirFKOrfaNoTemporarioESincronizarComFinal()
+    {
+        // Categoria no final
+        await using (var finalDb = CreateFinalContext())
+        {
+            finalDb.Set<CategoriaTeste>().Add(new CategoriaTeste { Id = 5, Nome = "Roupas" });
+            await finalDb.SaveChangesAsync();
+        }
+
+        // Produto no temporário com FK para CategoriaId = 5 (só existe no final)
+        var dual = CreateDualContext();
+        await dual.AdicionarAsync(new ProdutoTeste { Id = 1, Nome = "Camiseta", Preco = 50m, CategoriaId = 5 });
+
+        // Sincronizar — o produto deve ir para o final onde a FK é válida
+        await dual.SincronizarAsync();
+
+        await using var finalDb2 = CreateFinalContext();
+        var produto = await finalDb2.Set<ProdutoTeste>()
+            .Include(p => p.Categoria)
+            .FirstOrDefaultAsync(p => p.Id == 1);
+        Assert.NotNull(produto);
+        Assert.Equal("Camiseta", produto.Nome);
+        Assert.Equal(5, produto.CategoriaId);
+        Assert.NotNull(produto.Categoria);
+        Assert.Equal("Roupas", produto.Categoria.Nome);
     }
 }
