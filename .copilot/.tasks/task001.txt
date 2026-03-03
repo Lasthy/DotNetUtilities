@@ -1,0 +1,23 @@
+Create a DualDbUtilities classlib that will need to do the following:
+- Create a Entidade interface that demarks an entity, it should have a static abstract method to configure the entity with a model builder.
+- A DualDbContext class that accepts two DbContexts: one temporary, and one final.
+- Implement a SqliteDbContext and a SqlServerDbContext
+- The contexts should scan some given assemblies and add all classes with Entidade interface as a Set in the database.
+- Create a simple extension method to configure all of this.
+- This is how eveything should work:
+    1. The user will call the extension method to configure the DualDbContext in their Startup.cs or Program.cs file, passing in the necessary parameters such as connection strings and assemblies to scan.
+    2. The DualDbContext will be set up to use both the SqliteDbContext and SqlServerDbContext, allowing the user to interact with both databases seamlessly.
+    3. The user will be able to read from the final database and write to the temporary database, with the option to transfer data between the two as needed.
+    4. The Entidade interface will ensure that all entities are properly configured in the model.
+    5. The user will be able to sync the databases, and when that happens: 
+        - The data from the temporary database will be transferred to the final database.
+        - The temporary database will be cleared after the transfer is complete.
+        - If any errors occur during the transfer, the process will be rolled back to maintain data integrity.
+        - If the data exists in the final database, it will be updated with the new data from the temporary database instead of being duplicated.
+        - All foreign key relationships will be maintained during the transfer process to ensure data consistency.
+        - All constraints and indexes will be preserved during the transfer process to ensure optimal performance in the final database.
+        - The transfer process will be designed to handle large volumes of data efficiently, using batching or streaming techniques as necessary to avoid memory issues.
+        - This dual database system will be thread-safe, ensuring that if a thread add data to the temporary database, another thread will not be able to clear the temporary database until the transfer process is complete, preventing data loss or corruption.
+    6. The user will be able to easily manage and maintain both databases through the DualDbContext, with clear separation of concerns and a streamlined workflow for data management.
+    7. If possible, only one migration should be needed to create the necessary tables in both databases, and the migration should be designed to handle any differences in schema between the two databases gracefully.
+    8. It should be easy to integrate in an actual system
