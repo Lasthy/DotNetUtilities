@@ -147,28 +147,30 @@ public class ApiAdapter : IApiAdapter
         return rota;
     }
 
-    private static string ConstruirUrl(
+    private string ConstruirUrl(
         RotaApi rota,
         Dictionary<string, string>? parametrosCaminho,
         Dictionary<string, string>? parametrosQuery)
     {
+        var baseUrl = _configuracao.UrlBase.TrimEnd('/');
         var caminho = rota.Caminho.TrimStart('/');
+        var url = $"{baseUrl}/{caminho}";
 
         if (parametrosCaminho is not null)
         {
             foreach (var (chave, valor) in parametrosCaminho)
             {
-                caminho = caminho.Replace($"{{{chave}}}", Uri.EscapeDataString(valor));
+                url = url.Replace($"{{{chave}}}", Uri.EscapeDataString(valor));
             }
         }
 
         if (parametrosQuery is null || parametrosQuery.Count == 0)
-            return caminho;
+            return url;
 
         var query = string.Join("&",
             parametrosQuery.Select(p => $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value).Replace("%3D", "=")}"));
 
-        return $"{caminho}?{query}";
+        return $"{url}?{query}";
     }
 
     private HttpRequestMessage CriarRequest(HttpMethod metodo, string url, object? corpo)
