@@ -152,7 +152,7 @@ public class ApiAdapter : IApiAdapter
         Dictionary<string, string>? parametrosCaminho,
         Dictionary<string, string>? parametrosQuery)
     {
-        var caminho = rota.Caminho;
+        var caminho = rota.Caminho.TrimStart('/');
 
         if (parametrosCaminho is not null)
         {

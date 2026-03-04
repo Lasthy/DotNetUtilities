@@ -33,9 +33,10 @@ public class ExternalApiBuilder
         Configuracoes.Add(config);
 
         // Registra o HttpClient nomeado com base URL e headers
+        var urlBase = config.UrlBase.TrimEnd('/') + "/";
         Services.AddHttpClient($"ExternalApi_{config.Nome}", client =>
         {
-            client.BaseAddress = new Uri(config.UrlBase);
+            client.BaseAddress = new Uri(urlBase);
             client.Timeout = config.Timeout;
 
             foreach (var (chave, valor) in config.HeadersPadrao)
