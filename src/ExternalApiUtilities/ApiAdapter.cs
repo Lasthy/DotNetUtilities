@@ -166,7 +166,7 @@ public class ApiAdapter : IApiAdapter
             return caminho;
 
         var query = string.Join("&",
-            parametrosQuery.Select(p => $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value)}"));
+            parametrosQuery.Select(p => $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value).Replace("%3D", "=")}"));
 
         return $"{caminho}?{query}";
     }
