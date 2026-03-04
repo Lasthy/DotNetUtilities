@@ -5,14 +5,18 @@ namespace ExternalApiUtilities.Tests.Fixtures;
 /// </summary>
 public class AlunoExternoMapper : IRespostaMapper<AlunoExternoDto, AlunoExterno>
 {
-    public IEnumerable<AlunoExterno> Mapear(AlunoExternoDto resposta)
+    public Task<IReadOnlyList<AlunoExterno>> MapearAsync(AlunoExternoDto resposta, int clienteId, CancellationToken ct = default)
     {
-        yield return new AlunoExterno
+        var lista = new List<AlunoExterno>
         {
-            Id = resposta.Id,
-            Nome = resposta.NomeCompleto,
-            Graduacao = resposta.Faixa
+            new()
+            {
+                Id = resposta.Id,
+                Nome = resposta.NomeCompleto,
+                Graduacao = resposta.Faixa
+            }
         };
+        return Task.FromResult<IReadOnlyList<AlunoExterno>>(lista);
     }
 }
 
@@ -21,13 +25,14 @@ public class AlunoExternoMapper : IRespostaMapper<AlunoExternoDto, AlunoExterno>
 /// </summary>
 public class ListaAlunosMapper : IRespostaMapper<ListaAlunosDto, AlunoExterno>
 {
-    public IEnumerable<AlunoExterno> Mapear(ListaAlunosDto resposta)
+    public Task<IReadOnlyList<AlunoExterno>> MapearAsync(ListaAlunosDto resposta, int clienteId, CancellationToken ct = default)
     {
-        return resposta.Alunos.Select(a => new AlunoExterno
+        IReadOnlyList<AlunoExterno> lista = resposta.Alunos.Select(a => new AlunoExterno
         {
             Id = a.Id,
             Nome = a.NomeCompleto,
             Graduacao = a.Faixa
-        });
+        }).ToList();
+        return Task.FromResult(lista);
     }
 }

@@ -1,5 +1,6 @@
 using DualDbUtilities;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace ExternalApiUtilities;
 
@@ -21,19 +22,6 @@ public class ExternalApiBuilder
     /// Adiciona uma API externa com a configuração especificada.
     /// </summary>
     /// <param name="configurar">Action para configurar a API.</param>
-    /// <example>
-    /// <code>
-    /// builder.AdicionarApi(api =>
-    /// {
-    ///     api.Nome = "academia-api";
-    ///     api.UrlBase = "https://api.academia.com";
-    ///     api.HeadersPadrao["Authorization"] = "Bearer token";
-    ///     api.Desserializador = new DesserializadorComEnvelope(); // para APIs com envelope padrão
-    ///     api.Rotas.Add(new RotaApi { Nome = "listar-alunos", Caminho = "/api/alunos" });
-    ///     api.Rotas.Add(new RotaApi { Nome = "buscar-aluno", Caminho = "/api/alunos/{id}" });
-    /// });
-    /// </code>
-    /// </example>
     public ExternalApiBuilder AdicionarApi(Action<ConfiguracaoApi> configurar)
     {
         var config = new ConfiguracaoApi { Nome = null!, UrlBase = null! };
@@ -72,23 +60,27 @@ public class ExternalApiBuilder
     }
 
     /// <summary>
+    /// Registra um <see cref="IProvedorContextoPolling"/> para polling multi-tenant.
+    /// </summary>
+    /// <typeparam name="TProvedor">Implementação concreta do provedor de contextos.</typeparam>
+    public ExternalApiBuilder AdicionarProvedorContexto<TProvedor>()
+        where TProvedor : class, IProvedorContextoPolling
+    {
+        Services.AddScoped<IProvedorContextoPolling, TProvedor>();
+        return this;
+    }
+
+    /// <summary>
     /// Adiciona um serviço de polling que requisita periodicamente um endpoint,
     /// mapeia a resposta e salva no DualDb.
+    /// <para>
+    /// Se um <see cref="IProvedorContextoPolling"/> estiver registrado, o polling
+    /// itera sobre cada contexto (cliente/tenant) retornado.
+    /// </para>
     /// </summary>
     /// <typeparam name="TResposta">Tipo do DTO da resposta da API.</typeparam>
     /// <typeparam name="TEntidade">Tipo da entidade de domínio.</typeparam>
     /// <param name="configurar">Action para configurar o polling.</param>
-    /// <example>
-    /// <code>
-    /// builder.AdicionarPolling&lt;AlunoDto, Aluno&gt;(polling =>
-    /// {
-    ///     polling.Nome = "polling-alunos";
-    ///     polling.NomeApi = "academia-api";
-    ///     polling.NomeRota = "listar-alunos";
-    ///     polling.Intervalo = TimeSpan.FromMinutes(5);
-    /// });
-    /// </code>
-    /// </example>
     public ExternalApiBuilder AdicionarPolling<TResposta, TEntidade>(Action<ConfiguracaoPolling> configurar)
         where TEntidade : class, IEntidade
     {
@@ -104,8 +96,13 @@ public class ExternalApiBuilder
 
         PollingRegistrations.Add(svc =>
         {
-            svc.AddSingleton(config);
-            svc.AddHostedService<ServicoPollingApi<TResposta, TEntidade>>();
+            // Usa factory para injetar a config capturada diretamente, evitando
+            // ambiguidade quando há múltiplos pollings registrados.
+            svc.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
+                new ServicoPollingApi<TResposta, TEntidade>(
+                    config,
+                    sp.GetRequiredService<IServiceScopeFactory>(),
+                    sp.GetRequiredService<ILogger<ServicoPollingApi<TResposta, TEntidade>>>()));
         });
 
         return this;

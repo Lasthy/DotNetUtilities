@@ -6,23 +6,15 @@ using Microsoft.Extensions.Logging;
 namespace ExternalApiUtilities;
 
 /// <summary>
-/// Serviço hospedado que realiza polling periódico em um endpoint de API externa,
+/// Serviço hospedado que realiza polling periódico multi-tenant em um endpoint de API externa,
 /// mapeia a resposta para entidades e persiste no DualDb.
+/// <para>
+/// Para cada ciclo, obtém os contextos via <see cref="IProvedorContextoPolling"/>
+/// e executa o polling para cada um.
+/// </para>
 /// </summary>
 /// <typeparam name="TResposta">Tipo do dado retornado pela API (DTO).</typeparam>
 /// <typeparam name="TEntidade">Tipo da entidade do domínio.</typeparam>
-/// <example>
-/// <code>
-/// // Registrado automaticamente via:
-/// builder.AdicionarPolling&lt;AlunoDto, Aluno&gt;(polling =>
-/// {
-///     polling.Nome = "polling-alunos";
-///     polling.NomeApi = "academia-api";
-///     polling.NomeRota = "listar-alunos";
-///     polling.Intervalo = TimeSpan.FromMinutes(5);
-/// });
-/// </code>
-/// </example>
 public sealed class ServicoPollingApi<TResposta, TEntidade> : BackgroundService
     where TEntidade : class, IEntidade
 {
@@ -72,44 +64,102 @@ public sealed class ServicoPollingApi<TResposta, TEntidade> : BackgroundService
 
         await using var scope = _scopeFactory.CreateAsyncScope();
 
-        var adapterFactory = scope.ServiceProvider.GetRequiredService<IApiAdapterFactory>();
-        var mapper = scope.ServiceProvider.GetRequiredService<IRespostaMapper<TResposta, TEntidade>>();
-        var dualDb = scope.ServiceProvider.GetRequiredService<DualDbContext>();
+        var contextProvider = scope.ServiceProvider.GetService<IProvedorContextoPolling>();
+
+        if (contextProvider is null)
+        {
+            // Sem provedor de contexto — execução single-tenant (compatibilidade)
+            await ExecutarParaContextoAsync(scope.ServiceProvider, new ContextoPolling { Id = 0 }, ct);
+            return;
+        }
+
+        var contextos = await contextProvider.ObterContextosAsync(ct);
+
+        if (contextos.Count == 0)
+        {
+            _logger.LogDebug("Polling [{Nome}] sem contextos para processar", _config.Nome);
+            return;
+        }
+
+        foreach (var contexto in contextos)
+        {
+            try
+            {
+                await ExecutarParaContextoAsync(scope.ServiceProvider, contexto, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex,
+                    "Polling [{Nome}] falhou para contexto {ContextoId}",
+                    _config.Nome, contexto.Id);
+            }
+        }
+    }
+
+    private async Task ExecutarParaContextoAsync(
+        IServiceProvider sp, ContextoPolling contexto, CancellationToken ct)
+    {
+        var adapterFactory = sp.GetRequiredService<IApiAdapterFactory>();
+        var mapper = sp.GetRequiredService<IRespostaMapper<TResposta, TEntidade>>();
+        var dualDb = sp.GetRequiredService<DualDbContext>();
 
         var adapter = adapterFactory.Obter(_config.NomeApi);
+
+        // Mescla parâmetros fixos com os do contexto
+        var queryParams = MesclarParametros(_config.ParametrosQuery, contexto.ParametrosAdicionais);
 
         var resposta = await adapter.EnviarAsync<TResposta>(
             _config.NomeRota,
             _config.ParametrosCaminho,
-            _config.ParametrosQuery,
+            queryParams,
             ct: ct);
 
         if (!resposta.Sucesso)
         {
             _logger.LogWarning(
-                "Polling [{Nome}] requisição falhou: {Status} - {Erro}",
-                _config.Nome, resposta.CodigoStatus, resposta.MensagemErro);
+                "Polling [{Nome}] ctx={ContextoId} requisição falhou: {Status} - {Erro}",
+                _config.Nome, contexto.Id, resposta.CodigoStatus, resposta.MensagemErro);
             return;
         }
 
         if (resposta.Dados is null)
         {
-            _logger.LogWarning("Polling [{Nome}] resposta sem dados", _config.Nome);
+            _logger.LogWarning("Polling [{Nome}] ctx={ContextoId} resposta sem dados",
+                _config.Nome, contexto.Id);
             return;
         }
 
-        var entidades = mapper.Mapear(resposta.Dados).ToList();
+        var entidades = await mapper.MapearAsync(resposta.Dados, contexto.Id, ct);
 
         if (entidades.Count == 0)
         {
-            _logger.LogDebug("Polling [{Nome}] sem entidades para salvar", _config.Nome);
+            _logger.LogDebug("Polling [{Nome}] ctx={ContextoId} sem entidades para salvar",
+                _config.Nome, contexto.Id);
             return;
         }
 
         await dualDb.AdicionarVariosAsync(entidades, ct);
 
         _logger.LogInformation(
-            "Polling [{Nome}] salvou {Count} entidade(s) no banco temporário",
-            _config.Nome, entidades.Count);
+            "Polling [{Nome}] ctx={ContextoId} salvou {Count} entidade(s) no banco temporário",
+            _config.Nome, contexto.Id, entidades.Count);
+    }
+
+    private static Dictionary<string, string>? MesclarParametros(
+        Dictionary<string, string>? fixos,
+        Dictionary<string, string>? adicionais)
+    {
+        if ((fixos is null || fixos.Count == 0) && (adicionais is null || adicionais.Count == 0))
+            return null;
+
+        var resultado = new Dictionary<string, string>(fixos ?? []);
+
+        if (adicionais is not null)
+        {
+            foreach (var (chave, valor) in adicionais)
+                resultado[chave] = valor;
+        }
+
+        return resultado;
     }
 }

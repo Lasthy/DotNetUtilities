@@ -6,12 +6,12 @@ namespace ExternalApiUtilities.Tests;
 public class RespostaMapperTests
 {
     [Fact]
-    public void DeveMapearDtoParaEntidade()
+    public async Task DeveMapearDtoParaEntidade()
     {
         var mapper = new AlunoExternoMapper();
         var dto = new AlunoExternoDto { Id = 1, NomeCompleto = "João Silva", Faixa = "azul" };
 
-        var entidades = mapper.Mapear(dto).ToList();
+        var entidades = await mapper.MapearAsync(dto, clienteId: 1);
 
         Assert.Single(entidades);
         Assert.Equal(1, entidades[0].Id);
@@ -20,7 +20,7 @@ public class RespostaMapperTests
     }
 
     [Fact]
-    public void DeveMapearListaDeDtosParaEntidades()
+    public async Task DeveMapearListaDeDtosParaEntidades()
     {
         var mapper = new ListaAlunosMapper();
         var dto = new ListaAlunosDto
@@ -33,7 +33,7 @@ public class RespostaMapperTests
             ]
         };
 
-        var entidades = mapper.Mapear(dto).ToList();
+        var entidades = await mapper.MapearAsync(dto, clienteId: 1);
 
         Assert.Equal(2, entidades.Count);
         Assert.Equal("Carlos", entidades[0].Nome);
@@ -43,12 +43,12 @@ public class RespostaMapperTests
     }
 
     [Fact]
-    public void DeveRetornarListaVaziaQuandoSemAlunos()
+    public async Task DeveRetornarListaVaziaQuandoSemAlunos()
     {
         var mapper = new ListaAlunosMapper();
         var dto = new ListaAlunosDto { Total = 0, Alunos = [] };
 
-        var entidades = mapper.Mapear(dto).ToList();
+        var entidades = await mapper.MapearAsync(dto, clienteId: 1);
 
         Assert.Empty(entidades);
     }
